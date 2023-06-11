@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+
+[ -z "${0##/*}" ] || exec "$PWD/$0" "$@"
+
+set -eu
+
+say()
+{
+    printf '%s\n' "$*"
+}
+
+die()
+{
+    say "${0##*/}: $*" >&2
+    exit 1
+}
+
+expect()
+{
+    [ "$1" "$2" "$3" ] ||
+        die "Unexpected at line $BASH_LINENO : $1 $2 $3"
+}
+
+run_test()
+{
+    say
+    say '========================================'
+    say "Checking $1"
+    ( "$@" )
+}
+
+test_agent_cohort()
+{
+    (
+        { >&3 ; } 2>/dev/null || exec 3>&2
+        set -- "${0%/*}/../ssh-agent-cohort" "${0%/*}/socket" -- "$@"
+        set -- ${VALGRIND:+$VALGRIND --log-fd=3 --track-fds=yes --error-exitcode=127} "$@"
+        exec "$@"
+    )
+}
+
+test_run_once()
+{
+    local RESULT
+    RESULT=$(
+        test_agent_cohort echo 42
+    )
+    expect "$RESULT" = 42
+}
+
+test_run_once_no_file_descriptors()
+{
+    local RESULT
+    RESULT=$(
+        exec 3>&2 4>&1 <&- >&- 2>&-
+        test_agent_cohort sh -c 'echo 42 >&4'
+    )
+    expect "$RESULT" = 42
+}
+
+test_run_twice_select_first()
+{
+    local RESULT
+    RESULT=$(
+        (
+            export SSH_AUTH_SOCK="${0%/*}/1ST"
+            sleep 1 &&
+              test_agent_cohort sh -c 'cat $SSH_AUTH_SOCK && sleep 5' ) &
+        (
+            export SSH_AUTH_SOCK="${0%/*}/2ND"
+            sleep 3 &&
+              test_agent_cohort sh -c 'cat $SSH_AUTH_SOCK' ) &
+        wait
+    )
+    expect "$RESULT" = 11
+}
+
+test_run_twice_select_second()
+{
+    local RESULT
+    RESULT=$(
+        (
+            export SSH_AUTH_SOCK="${0%/*}/1ST"
+            test_agent_cohort sh -c 'cat $SSH_AUTH_SOCK && sleep 3' ) &
+        (
+            export SSH_AUTH_SOCK="${0%/*}/2ND"
+            test_agent_cohort sh -c 'sleep 5 && cat $SSH_AUTH_SOCK' ) &
+        wait
+    )
+    expect "$RESULT" = 12
+}
+
+test_done()
+{
+    expect 0 -eq 0
+}
+
+main()
+{
+    run_test test_run_once
+    run_test test_run_once_no_file_descriptors
+
+    run_test test_run_twice_select_first
+    run_test test_run_twice_select_second
+
+    run_test test_done
+}
+
+main "$@"
